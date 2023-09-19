@@ -1,0 +1,9 @@
+[package]
+name = "xsint"
+description = "Lightweight RISC-V Interpreter"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "xsint"
+path = "src/main.rs"
