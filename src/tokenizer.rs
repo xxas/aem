@@ -1,342 +1,407 @@
+use lazy_static::lazy_static;
+use bitflags::bitflags;
 use std::str::FromStr;
 use std::fmt::Debug;
-use crate::util::AddressingMode;
+use regex::Regex;
+
+lazy_static!
+{ // Regex patterns for supported token types.
+    static ref LABEL_REGEX: Regex           = Regex::new(r"^\s*[a-zA-Z_][a-zA-Z_0-9]*:\s*").unwrap();
+    static ref SECTION_REGEX: Regex         = Regex::new(r"^\s*\.[a-zA-Z_][a-zA-Z_0-9]*(\s+.+)?$").unwrap();
+    static ref INSTRUCTION_REGEX: Regex     = Regex::new(r"^[a-zA-Z]+($|\s.+)").unwrap();
+    static ref REGISTER_REGEX: Regex        = Regex::new(r"^\s*[xf]\d+\s*$").unwrap();
+    static ref OFFSET_REGEX: Regex          = Regex::new(r"(-?\d+)\(([a-zA-Z_][a-zA-Z0-9_]*)\)").unwrap();
+    static ref DESTINATION_REGEX: Regex     = Regex::new(r"([a-zA-Z_][a-zA-Z0-9_]*)").unwrap();
+    static ref DATA_REGEX: Regex            = Regex::new(r#""[^"]*"|\(0x[0-9a-fA-F]+(?:, ?0x[0-9a-fA-F]+)*\)|\([0-9]+(?:, ?[0-9]+)*\)"#).unwrap();
+}
+
+bitflags!
+{ // Section attribute flags.
+    pub struct SectionFlags: u32
+    {
+        const ALLOCATE = 0b0000_0001;
+        const WRITE = 0b0000_0010;
+        const EXECUTE = 0b0000_0100;
+        const MERGE = 0b0000_1000;
+        const STRING = 0b0001_0000;
+        const GROUP = 0b0010_0000;
+        const TLS = 0b0100_0000;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DataType
+{
+    Byte = 0,   // byte values.
+    Half = 1,   // halfword (2 bytes) values.
+    Word = 2,   // word (4 bytes) values.
+    Dword = 3,  // double word (8 bytes) values.
+    Float = 4,  // single-precision floating point values.
+    Double = 5, // double-precision floating point values.
+    ASCII = 6,  // string without null termination.
+    ASCIZ = 7   // .asciz/.string: null-terminated string.
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RelativeSymbol
+{ // Symbol that an offset is relative to.
+    Label(String),
+    Register(char, u8)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token<T: Copy + Debug>
 {
-    /*      Section-name Section-Attributes Followed-Tokens */
-    Section(String, Option<Vec<String>>, Vec<Token<T>>),
-    /*      Directive-name Directive-Attributes */
-    Directive(String, Vec<String>),
-    /*      Label-name Followed-Tokens */
+    Section(String, SectionFlags, Vec<Token<T>>),
     Label(String, Vec<Token<T>>),
-    /*      Mnemonic Followed-Tokens */
-    Mnemonic(String, Vec<Token<T>>),
-    /*      Symbol-name */
-    Symbol(String),
-    /*      Offset-Label Offset */
+    Data(String, DataType, T),
+    Instruction(String, Vec<Token<T>>),
     Offset
     {
-        base: String,
-        offset: Option<AddressingMode<T>>
+        base: RelativeSymbol,
+        offset: T
     },
-    /*      Register-name */
-    Register(String),
-    /*      Immediate-value<T> */
-    Immediate(T)
+    Destination(String),
+    Register(char, u8),
+    Immediate(T),
+    Debug(String)
 }
 
-pub struct Tokenizer<T: Copy + Debug>
+#[derive(Debug)]
+enum TokenizeError
+{
+    InvalidSection(String),
+    InvalidSectionFlag(String),
+    InvalidLabel(String),
+    InvalidInstruction(String),
+    InvalidRegister(String),
+    InvalidImmediate(String),
+    InvalidOffset(String),
+    Other(String)
+}
+
+pub trait ParseWithRadix
+{
+    fn from_str_radix(src: &str, radix: u32) -> Result<Self, std::num::ParseIntError>
+    where Self: Sized;
+}
+
+impl ParseWithRadix for i32
+{
+    fn from_str_radix( src: &str, radix: u32) -> Result<Self, std::num::ParseIntError>
+    {
+        i32::from_str_radix(src, radix)
+    }
+}
+
+impl ParseWithRadix for i64
+{
+    fn from_str_radix( src: &str, radix: u32) -> Result<Self, std::num::ParseIntError>
+    {
+        i64::from_str_radix(src, radix)
+    }
+}
+
+enum ParseValueError<T: FromStr>
+{
+    IntError(std::num::ParseIntError),
+    StrError(<T as FromStr>::Err)
+}
+
+fn parse_value<T: ParseWithRadix + std::str::FromStr>(s: &str) -> Result<T, ParseValueError<T>> {
+    if s.starts_with("0x")
+    {
+        T::from_str_radix(&s[2..], 16).map_err(ParseValueError::IntError)
+    }
+    else
+    {
+        s.parse::<T>().map_err(ParseValueError::StrError)
+    }
+}
+
+
+pub struct Tokenizer<T: FromStr + Copy + Debug + Default>
 {
     pub tokens: Vec<Token<T>>
 }
 
-impl<T: Copy + Debug> Tokenizer<T>
+impl<T: ParseWithRadix + FromStr + Copy + Debug + Default> Tokenizer<T>
 {
     pub fn new_from_string(string: &str) -> Result<Self, String>
-        where T: FromStr, <T as FromStr>::Err: std::fmt::Debug
     {
-        Ok(Tokenizer {
-            tokens: Self::tokenize(string)?
-        })
+        let cleaned_lines: Vec<&str> = string
+            .lines()
+            .filter_map(|line| line.trim().split('#').next())
+            .filter(|&line| !line.is_empty())
+            .collect();
+
+        Self::process_block(cleaned_lines)
+            .map(|tokens| Tokenizer { tokens })
+            .map_err(|e| format!("{:?}", e))
     }
 
-    pub fn tokenize(string: &str) -> Result<Vec<Token<T>>, String>
-        where T: FromStr, <T as FromStr>::Err: std::fmt::Debug
-    {
-        let mut tokens = Vec::<Token<T>>::new();
-        let mut lines_iter = string.lines().peekable();
+    fn get_label(line: &str) -> Result<(&str, &str), TokenizeError>
+    { // Split the label name and the following content at ':'.
+        let mut label_parts = line.splitn(2, ':');
 
-        while let Some(line) = lines_iter.next()
+        if let (Some(label_name), Some(label_content)) = (label_parts.next(), label_parts.next())
+            {
+                let label_name = label_name.trim();
+
+                if label_name.is_empty()
+                { // Labels are required to have a name to produce references.
+                    return Err(TokenizeError::InvalidLabel("Invalid syntax: empty label name.".to_string()))
+                }
+
+                return Ok((label_name, label_content.trim()))
+        };
+
+        Err(TokenizeError::InvalidLabel(format!("Unable to parse label from line: \"{}\"", line)))
+    }
+
+    fn get_section(line: &str) -> Result<(&str, SectionFlags), TokenizeError>
+    { // Detect the start of a section
+        let mut parts = line.split_whitespace();
+
+        if let Some(directive) = parts.next()
+        { // Match the directive to deduce the flags of the section.
+            let mut section_flags = SectionFlags::empty();
+
+            match directive
+            { // Custom section directive, followed by name and attributes.
+                ".section" =>
+                {
+                    let section_name = parts.next().unwrap_or("").trim_start_matches('.');
+                    let section_params = parts.next().unwrap_or("").to_lowercase();
+
+                    for c in section_params.chars()
+                    { // bitwise or assign each matched character.
+                        match c
+                        {
+                            'a' => section_flags |= SectionFlags::ALLOCATE,
+                            'w' => section_flags |= SectionFlags::WRITE,
+                            'x' => section_flags |= SectionFlags::EXECUTE,
+                            'm' => section_flags |= SectionFlags::MERGE,
+                            's' => section_flags |= SectionFlags::STRING,
+                            'g' => section_flags |= SectionFlags::GROUP,
+                            't' => section_flags |= SectionFlags::TLS,
+                            _   =>
+                            { // Failed while parsing a section flag that is unsupported.
+                                return Err(TokenizeError::InvalidSectionFlag(format!("Unrecognized section flag identifier: \"{}\"", c)))
+                            }
+                        }
+                    }
+                    return Ok((section_name, section_flags))
+                }, // Handle sections with pre-defined attributes.
+                ".text" =>
+                {
+                    section_flags |= SectionFlags::EXECUTE;
+                    return Ok((directive.trim_start_matches('.'), section_flags))
+                },
+                ".data" =>
+                {
+                    section_flags |= SectionFlags::ALLOCATE | SectionFlags::WRITE;
+                    return Ok((directive.trim_start_matches('.'), section_flags))
+                },
+                ".bss" =>
+                {
+                    section_flags |= SectionFlags::ALLOCATE;
+                    return Ok((directive.trim_start_matches('.'), section_flags))
+                },
+                _ =>
+                { // Unmatched directive, unable to deduce the section flags.
+                    return Ok((directive.trim_start_matches('.'), section_flags))
+                }
+            }
+        }
+
+        Err(TokenizeError::InvalidSection(format!("Unable to parse section from line: \"{}\"", line)))
+    }
+
+    fn get_register(word: &str) -> Result<Token<T>, TokenizeError>
+    { // todo: add support for names such as 'zero', 'ra', 'sp', 'gp', 'tp', 't*', 'a*', 's*'.
+        match word.chars().next()
+        { // Registers either start with 'x' or 'f'.
+            Some(prefix @ 'x') | Some(prefix @ 'f') =>
+            {
+                match &word[1..].parse::<u8>()
+                { // Parse the index value.
+                    Ok(val) => return Ok(Token::<T>::Register(prefix, *val)),
+                    Err(_) => return Err(TokenizeError::InvalidRegister(format!("Failed to parse register: \"{}\"", word))),
+                };
+            }, // A register is not present.
+            _ => return Err(TokenizeError::InvalidRegister(format!("Failed to parse register: \"{}\"", word))),
+        }
+    }
+
+    fn get_offset(word: &str) -> Result<Token<T>, TokenizeError>
+    { // split the offset value and symbol from each other.
+        let offset_symbol_split: Vec<&str> = word.trim_end_matches(')').splitn(2, '(').collect();
+
+        if let Some(symbol) = offset_symbol_split.last()
         {
-            // Trim comment from line to avoid unnecessary tokenization.
-            let trimmed = line.split("#").next().unwrap_or("").trim();
 
-            if trimmed.is_empty()
-            {   // Empty comment line, skip to next line.
-                continue;
+            return Ok(Token::Offset
+            {
+                base: if REGISTER_REGEX.is_match(symbol)
+                {
+                    match Self::get_register(symbol)
+                    {
+                        Ok(Token::Register(char_val, num_val)) => RelativeSymbol::Register(char_val, num_val),
+                        _ => return Err(TokenizeError::InvalidOffset("Failed to parse an offset value.".to_string())),
+                    }
+                }
+                else
+                {
+                    RelativeSymbol::Label(symbol.to_string())
+                },
+                offset: parse_value::<T>(offset_symbol_split.first().unwrap_or(&"")).unwrap_or_default(),
+            });
+        }
+
+        Ok(Token::Debug(word.to_string()))
+    }
+
+    fn process_instruction(line: &str) -> Result<Token<T>, TokenizeError>
+    {
+        // Mnemonic and operands split.
+        let mnemonic_split: Vec<&str> = line
+            .trim().splitn(2, ' ')
+            .collect();
+
+        if let Some(mnemonic) = mnemonic_split.first()
+        { // todo: differeniating _, f_.s, f_.d instrutions.
+            let mut operands = Vec::new();
+
+            for operand in mnemonic_split[1].split(',').map(|s| s.trim())
+            {
+                if REGISTER_REGEX.is_match(operand)
+                {
+                    operands.push(Self::get_register(operand)?)
+                }
+                else if OFFSET_REGEX.is_match(operand)
+                {
+                    operands.push(Self::get_offset(operand)?)
+                }
+                // Immediate operands, hexadecimal and decimal values.
+                else if operand.chars().all(|c| c.is_ascii_hexdigit() || c == 'x') {
+                    match parse_value::<T>(operand)
+                    { // Parse the index value.
+                        Ok(val) => operands.push(Token::Immediate(val)),
+                        Err(_) => return Err(TokenizeError::InvalidImmediate(format!("Failed to parse an immediate operand: \"{}\"", operand)))
+                    }
+                } // Regex is potentially over-kill but captures syntax perfectly.
+                // alphabetic or _ first character followed by alphanumeric or _.
+                else if DESTINATION_REGEX.is_match(operand)
+                {
+                    operands.push(Token::Destination(operand.trim().to_string()))
+                }
+                else
+                {
+                    return Err(TokenizeError::InvalidInstruction(format!("Unable to parse an instruction operand: \"{}\"", operand)))
+                }
             }
 
-            // Directives and sections.
-            if trimmed.starts_with(".")
+            return Ok(Token::Instruction(mnemonic.to_string(), operands))
+        }
+        Err(TokenizeError::InvalidInstruction(format!("Unable to parse instruction from line: \"{}\"", line)))
+    }
+
+    fn process_constant_data(line: &str) -> Result<Token<T>, TokenizeError>
+    {
+        Ok(Token::Debug(line.to_string()))
+    }
+
+    fn process_line(line: &str) -> Result<Token<T>, TokenizeError>
+    {
+        if INSTRUCTION_REGEX.is_match(line)
+        { // Process as an instruction.
+            return Ok(Self::process_instruction(line)?)
+        }
+        else if DATA_REGEX.is_match(line)
+        { // Process as constant data.
+            return Ok(Self::process_constant_data(line)?)
+        }
+
+        // Failed to process the contents of a line.
+        Err(TokenizeError::Other(format!("Unable to parse from line: \"{}\"", line)))
+    }
+
+    fn process_block(block: Vec<&str>) -> Result<Vec<Token<T>>, TokenizeError>
+    {
+        let mut tokens = Vec::new();
+        let mut line_iter = block.iter().peekable();
+
+        // Closure to process lines until a specific condition is met.
+        let process_lines_until =
+            |line_iter: &mut std::iter::Peekable<std::slice::Iter<&str>>, condition: &dyn Fn(&str) -> bool| -> Result<Vec<Token<T>>, TokenizeError>
             {
-                // Split the line at the first space.
-                let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
+                let mut current_tokens = Vec::new();
 
-                // parts[0] now contains the directive/section name.
-                let name = parts[0].to_string();
-
-                // If there's more after the directive name, split those by whitespace to get individual labels/symbols.
-                let symbols = if parts.len() > 1
-                {
-                    parts[1].split_whitespace().map(|s| s.to_string()).collect::<Vec<_>>()
-                }
-                else
-                {
-                    Vec::new()
-                };
-
-                if !symbols.is_empty() && parts[0] != ".section"
-                {   // Push the finished directive followed by symbols.
-                    tokens.push(Token::Directive(name, symbols));
-                }
-                else
-                {   // Tokenize the next lines under a section.
-                    // This is a section. Gather all lines under this section until the next one.
-                    let mut section_content = Vec::new();
-
-                    while let Some(&next_line) = lines_iter.peek()
-                    {
-                        // Trim comment from line to avoid unnecessary tokenization.
-                        let next_trimmed = next_line.split("#").next().unwrap_or("").trim();
-
-                        if trimmed.is_empty()
-                        {   // Empty comment line, skip to next line.
-                            continue;
-                        }
-
-                        let next_parts: Vec<&str> = next_trimmed.splitn(2, ' ').collect();
-
-                        // New section.
-                        if next_trimmed.starts_with('.') && next_parts.len() == 1
-                        || next_trimmed.starts_with(".section")
-                        {
-                            break;
-                        }
-
-                        section_content.push(lines_iter.next().unwrap().to_owned());
-                    }
-
-                    let section_tokens = Self::tokenize(&section_content.join("\n"))?;
-
-                    // .section allows for custom attributes.
-                    tokens.push(Token::Section(name,
-                        if parts[0] == ".section" { Some(symbols) } else { None },
-                        section_tokens
-                    ));
-                }
-            } // Labels.
-            else if trimmed.contains(":")
-            {
-                // Split the line at ":".
-                let parts: Vec<&str> = trimmed.splitn(2, ':').collect();
-
-                // parts[0] now contains the label name.
-                let name = parts[0].to_string();
-
-                let mut label_content = Vec::new();
-                label_content.push(parts[1].to_owned());
-
-                while let Some(&next_line) = lines_iter.peek()
-                {
-                    // Trim comment from line to avoid unnecessary tokenization.
-                    let next_trimmed = next_line.split('#').next().unwrap_or("").trim();
-
-                    if trimmed.is_empty()
-                    {   // Empty comment line, skip to next line.
-                        continue;
-                    }
-
-                    let next_parts: Vec<&str> = next_trimmed.splitn(2, ' ').collect();
-
-                    // New section.
-                    if next_trimmed.starts_with('.') && next_parts.len() == 1
-                    || next_trimmed.starts_with(".section") || next_trimmed.contains(":")
-                    {
+                while let Some(&next_line) = line_iter.peek() {
+                    if condition(next_line)
+                    { // e.g. is_section, is_label, etc.
                         break;
                     }
 
-                    label_content.push(lines_iter.next().unwrap().to_owned());
-                };
+                    // Tokenize data or text.
+                    current_tokens.push(Self::process_line(next_line)?);
 
-                let label_tokens = Self::tokenize(&label_content.join("\n"))?;
+                    // Consume the line.
+                    line_iter.next();
+                }
+                Ok(current_tokens)
+            };
 
-                tokens.push(Token::Label(name, label_tokens))
-            } // Registers.
-            // Register offset, pattern of Off(Reg). => Reg + Off
-            else if trimmed.contains('(') && trimmed.contains(')') && trimmed.split(' ').count() == 1
-            {
-                // Split offset and relative label/register at first '('.
-                let parts: Vec<&str> = trimmed.splitn(2, '(').collect();      
+        while let Some(&line) = line_iter.peek()
+        {
+            if SECTION_REGEX.is_match(line)
+            { // Process following lines and nest them within the section.
+                let (section_name, flags) = Self::get_section(line)?;
+                let mut section_tokens = Vec::new();
 
-                // parse offset from string.          
-                let offset = 
-                    if parts.len() > 1
-                    {
-                        match parts[0].parse::<T>() 
-                        {
-                        Ok(value) => {
-                            Some(AddressingMode::RegisterOffset(value)),
+                 // Consume the section line.
+                line_iter.next();
+
+                while let Some(&inner_line) = line_iter.peek() {
+                    if SECTION_REGEX.is_match(inner_line)
+                    { // End of the current section.
+                        break;
+                    }
+                    else if LABEL_REGEX.is_match(inner_line)
+                    { // Label nested in section.
+                        let (label_name, label_content) = Self::get_label(inner_line)?;
+
+                        // Consume the label line.
+                        line_iter.next();
+
+                        let mut label_tokens = process_lines_until(&mut line_iter,
+                        // Ensure there isn't a label or a section within the label that's being processed.
+                            &|l|
+                                LABEL_REGEX.is_match(l) || !DATA_REGEX.is_match(l) && SECTION_REGEX.is_match(l)
+                            )?;
+
+                        if !label_content.is_empty()
+                        { // Process the remaining label content on the same line.
+                            label_tokens.insert( 0, Self::process_line(label_content)?);
                         }
-                        Err(_) => None,
-                        }
+
+                        // Tokenize following lines.
+                        section_tokens.push(Token::Label(label_name.to_string(), label_tokens));
                     }
                     else
-                    {
-                        None
-                    };
-            
-                tokens.push(Token::Offset { base: parts[1].replace(")", "").to_string(), offset });
+                    { // Process standalone lines within the section.
+                        section_tokens.push(Self::process_line(inner_line)?);
+                        line_iter.next();
+                    }
+                }
+                tokens.push(Token::Section(section_name.to_string(), flags, section_tokens));
             }
-            else if trimmed.starts_with('x') &&
-                // Ignore any offsets that may also start with a register.
-                !trimmed.contains('+') && !trimmed.contains('-') {
-                let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
-
-                // Instruction mnemonic.
-                let register_name = parts[0].replace(',', "").to_string();
-
-                tokens.push(Token::Register(register_name));
-
-                // Any remaining registers/immediate values on the line.
-                if parts.len() > 1
-                {
-                    tokens.append(&mut Self::tokenize(parts[1]).unwrap_or_default())
-                }
-            }
-            else if trimmed.chars().all(|c| c.is_digit(10) || c == '-' || c == '+')
-            {
-                let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
-
-                match trimmed.replace(',', "").parse::<T>() {
-                    Ok(value) => tokens.push(Token::Immediate(value)),
-                    Err(_) => return Err(format!("Failed to parse immediate value: {}", trimmed)),
-                }
-
-                // Any remaining registers/immediate values on the line.
-                if parts.len() > 1
-                {
-                    tokens.append(&mut Self::tokenize(parts[1]).unwrap_or_default())
-                }
-            }  // Tokenization of an instruction.
-            else {
-                let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
-
-                // Instruction mnemonic.
-                let mnemonic_name = parts[0].to_string();
-
-                // Instruction registers and immediate values operated on, if any.
-                let reg_imm = if parts.len() > 1
-                {
-                    Self::tokenize(parts[1])?
-                }
-                else
-                {
-                    Vec::new()
-                };
-
-                tokens.push(Token::Mnemonic(mnemonic_name, reg_imm));
+            else
+            { // Consume any other lines that aren't sections.
+                line_iter.next();
             }
         }
-        /*
-        for line in string.lines()
-        {
-            for (index, word) in line.split_whitespace().enumerate()
-            {
-                if index == 0
-                {
-                    // For segments.
-                    if word.starts_with('.')
-                    {
-                        tokens.push(Token::Segment(word.to_string()));
-                    }
-                    // For labels.
-                    else if word.ends_with(':')
-                    {
-                        tokens.push(Token::Label(word.trim_end_matches(':').to_string()));
-                    }
-                    else
-                    { // For mnemonics.
-                        tokens.push(Token::Mnemonic(word.to_string()));
-                    }
-                }
-                // Registers always start with an x*.
-                else if word.starts_with("x")
-                {
-                    tokens.push(Token::Register(word.trim_end_matches(",").to_string()))
-                }
-                // Match any immediate value.
-                else if word.chars().all(|c| c.is_digit(10) || c == '-' || c == '+')
-                {
-                    match word.parse::<T>() {
-                        Ok(value) => tokens.push(Token::Immediate(value)),
-                        Err(_) => return Err(format!("Failed to parse immediate value: {}", word)),
-                    }
-                }
-                // If it contains both '(' and ')', it's a base + offset addressing.
-                else if word.contains('(') && word.contains(')')
-                {
-                    let parts: Vec<&str> = word.split(['(', ')'].as_ref()).collect();
-
-                    // Ensure there are at least two parts (immediate and base register).
-                    if parts.len() != 3 || parts[2] != "" {
-                        return Err(format!("Invalid offset format: {}", word));
-                    }
-
-                    // Try to parse the immediate part.
-                    let offset_val: T = match parts[0].parse()
-                    {
-                        Ok(val) => val,
-                        Err(_) => return Err(format!("Failed to parse offset immediate value: {}", parts[0]))
-                    };
-
-                    // The second part is the base register.
-                    let base: String = parts[1].to_string();
-                    let offset = AddressingMode::RegisterOffset(offset_val);
-
-                    tokens.push(Token::Offset{ base, offset });
-                }
-                // If it just contains '(', it's only a base addressing or it might be an error.
-                else if word.contains('(')
-                {
-                    let parts: Vec<&str> = word.split(')').collect();
-                    if parts.len() != 2 || parts[1] != "" {
-                        return Err(format!("Invalid base format: {}", word));
-                    }
-
-                    let base: String = parts[0].to_string();
-                    let offset = AddressingMode::None; // No offset.
-
-                    tokens.push(Token::Offset{ base, offset });
-                }
-                // If it doesn't contain any parentheses, it's likely a label or a standalone immediate.
-                else if word.chars().all(|c| c.is_alphanumeric() || c == '_')
-                {
-                    tokens.push(Token::Offset{ base: word.to_string(), offset: AddressingMode::None });
-                }
-                else if word.starts_with('.')
-                {
-                    let directive = word.to_string();
-                    let mut data_vals = Vec::new();
-
-                    // Capture the next words as the data for this directive until the End or another directive.
-                    while let Some(next_word) = iterator.next()
-                    {
-                        match next_word.parse::<T>()
-                        {
-                            Ok(val) => data_vals.push(val),
-                            Err(_) => {
-                                iterator.put_back(next_word); // Assuming you're using an iterator with peek/put_back capability.
-                                break;
-                            },
-                        }
-                    }
-
-                    tokens.push(Token::Data(directive, data_vals));
-                }
-                else
-                {
-                    match word.parse::<T>()
-                    {
-                        Ok(immediate_val) => tokens.push(Token::Immediate(immediate_val)),
-                        Err(_) => return Err(format!("Unknown token: {}", word)),
-                    }
-                }
-            }
-            // Mark the end of the instruction.
-            tokens.push(Token::End)
-        }*/
 
         Ok(tokens)
     }
