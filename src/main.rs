@@ -29,19 +29,3 @@ fn main() {
         }
     }
 }
-
-/*
-nono:
-    .rodata 
-    data_label:
-    .asciz "Hello, World!"
-    .word 100 , 0x100,235
-    .bss
-
-works:
-    .rodata
-    data_label:
-    .asciz "Hello, World!"
-    .word 100 , 0x100,235
-    .bss
-*/
