@@ -12,7 +12,7 @@ lazy_static!
     static ref REGISTER_REGEX: Regex        = Regex::new(r"^\s*[xf]\d+\s*$").unwrap();
     static ref OFFSET_REGEX: Regex          = Regex::new(r"(-?\d+)\(([a-zA-Z_][a-zA-Z0-9_]*)\)").unwrap();
     static ref DESTINATION_REGEX: Regex     = Regex::new(r"([a-zA-Z_][a-zA-Z0-9_]*)").unwrap();
-    static ref DATA_REGEX: Regex            = Regex::new(r#""[^"]*"|\(0x[0-9a-fA-F]+(?:, ?0x[0-9a-fA-F]+)*\)|\([0-9]+(?:, ?[0-9]+)*\)"#).unwrap();
+    static ref DATA_REGEX: Regex            = Regex::new(r#""[^"]*"|\s*0x[0-9a-fA-F]+\s*|\s*[0-9]+\s*"#).unwrap();
 }
 
 bitflags!
@@ -32,14 +32,11 @@ bitflags!
 #[derive(Debug, Clone, PartialEq)]
 pub enum DataType
 {
-    Byte = 0,   // byte values.
-    Half = 1,   // halfword (2 bytes) values.
-    Word = 2,   // word (4 bytes) values.
-    Dword = 3,  // double word (8 bytes) values.
-    Float = 4,  // single-precision floating point values.
-    Double = 5, // double-precision floating point values.
-    ASCII = 6,  // string without null termination.
-    ASCIZ = 7   // .asciz/.string: null-terminated string.
+    Byte(Vec<u8>),
+    Half(Vec<u16>),
+    Word(Vec<u32>),
+    Dword(Vec<u64>),
+    String(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,14 +51,13 @@ pub enum Token<T: Copy + Debug>
 {
     Section(String, SectionFlags, Vec<Token<T>>),
     Label(String, Vec<Token<T>>),
-    Data(String, DataType, T),
+    Data(DataType),
     Instruction(String, Vec<Token<T>>),
     Offset
     {
         base: RelativeSymbol,
         offset: T
     },
-    Destination(String),
     Register(char, u8),
     Immediate(T),
     Debug(String)
@@ -73,6 +69,7 @@ enum TokenizeError
     InvalidSection(String),
     InvalidSectionFlag(String),
     InvalidLabel(String),
+    InvalidDataDirective(String),
     InvalidInstruction(String),
     InvalidRegister(String),
     InvalidImmediate(String),
@@ -86,21 +83,28 @@ pub trait ParseWithRadix
     where Self: Sized;
 }
 
-impl ParseWithRadix for i32
+macro_rules! impl_parse_with_radix 
 {
-    fn from_str_radix( src: &str, radix: u32) -> Result<Self, std::num::ParseIntError>
+    ($type:ty) => 
     {
-        i32::from_str_radix(src, radix)
-    }
+        impl ParseWithRadix for $type 
+        {
+            fn from_str_radix(src: &str, radix: u32) -> Result<Self, std::num::ParseIntError> 
+            {
+                <$type>::from_str_radix(src, radix)
+            }
+        }
+    };
 }
 
-impl ParseWithRadix for i64
-{
-    fn from_str_radix( src: &str, radix: u32) -> Result<Self, std::num::ParseIntError>
-    {
-        i64::from_str_radix(src, radix)
-    }
-}
+impl_parse_with_radix!(u8);
+impl_parse_with_radix!(i8);
+impl_parse_with_radix!(i16);
+impl_parse_with_radix!(u16);
+impl_parse_with_radix!(i32);
+impl_parse_with_radix!(i64);
+impl_parse_with_radix!(u32);
+impl_parse_with_radix!(u64);
 
 enum ParseValueError<T: FromStr>
 {
@@ -119,6 +123,12 @@ fn parse_value<T: ParseWithRadix + std::str::FromStr>(s: &str) -> Result<T, Pars
     }
 }
 
+fn parse_data<T: ParseWithRadix + Default + std::str::FromStr>(content: &str) -> Vec<T> {
+    content
+        .split(',')
+        .map(|s| parse_value::<T>(s.trim()).unwrap_or_default())
+        .collect()
+}
 
 pub struct Tokenizer<T: FromStr + Copy + Debug + Default>
 {
@@ -130,11 +140,10 @@ impl<T: ParseWithRadix + FromStr + Copy + Debug + Default> Tokenizer<T>
     pub fn new_from_string(string: &str) -> Result<Self, String>
     {
         let cleaned_lines: Vec<&str> = string
-            .lines()
-            .filter_map(|line| line.trim().split('#').next())
-            .filter(|&line| !line.is_empty())
-            .collect();
-
+        .lines()
+        .filter_map(|line| line.split('#').next().map(str::trim).filter(|&s| !s.is_empty()))
+        .collect();
+        
         Self::process_block(cleaned_lines)
             .map(|tokens| Tokenizer { tokens })
             .map_err(|e| format!("{:?}", e))
@@ -187,35 +196,34 @@ impl<T: ParseWithRadix + FromStr + Copy + Debug + Default> Tokenizer<T>
                             't' => section_flags |= SectionFlags::TLS,
                             _   =>
                             { // Failed while parsing a section flag that is unsupported.
-                                return Err(TokenizeError::InvalidSectionFlag(format!("Unrecognized section flag identifier: \"{}\"", c)))
+                                return Err(TokenizeError::InvalidSectionFlag(format!(r#"Unrecognized section flag identifier: "{}""#, c)))
                             }
                         }
                     }
                     return Ok((section_name, section_flags))
                 }, // Handle sections with pre-defined attributes.
-                ".text" =>
+                ".text" | ".init" | ".fini" => 
                 {
-                    section_flags |= SectionFlags::EXECUTE;
-                    return Ok((directive.trim_start_matches('.'), section_flags))
-                },
-                ".data" =>
+                    section_flags |= SectionFlags::EXECUTE
+                }
+                ".data" | ".sdata" =>
                 {
-                    section_flags |= SectionFlags::ALLOCATE | SectionFlags::WRITE;
-                    return Ok((directive.trim_start_matches('.'), section_flags))
-                },
-                ".bss" =>
+                    section_flags |= SectionFlags::ALLOCATE | SectionFlags::WRITE
+                }
+                ".bss" | ".sbss" | ".rodata" =>
                 {
-                    section_flags |= SectionFlags::ALLOCATE;
-                    return Ok((directive.trim_start_matches('.'), section_flags))
-                },
-                _ =>
-                { // Unmatched directive, unable to deduce the section flags.
-                    return Ok((directive.trim_start_matches('.'), section_flags))
+                    section_flags |= SectionFlags::ALLOCATE
+                }
+                _ => 
+                {
+                    return Err(TokenizeError::InvalidSection(format!(r#"Unrecognized section directive from line: "{}""#, line)))
                 }
             }
+
+            return Ok((directive.trim_start_matches('.'), section_flags))
         }
 
-        Err(TokenizeError::InvalidSection(format!("Unable to parse section from line: \"{}\"", line)))
+        Err(TokenizeError::InvalidSection(format!(r#"Unable to parse section directive from line: "{}""#, line)))
     }
 
     fn get_register(word: &str) -> Result<Token<T>, TokenizeError>
@@ -227,10 +235,10 @@ impl<T: ParseWithRadix + FromStr + Copy + Debug + Default> Tokenizer<T>
                 match &word[1..].parse::<u8>()
                 { // Parse the index value.
                     Ok(val) => return Ok(Token::<T>::Register(prefix, *val)),
-                    Err(_) => return Err(TokenizeError::InvalidRegister(format!("Failed to parse register: \"{}\"", word))),
+                    Err(_) => return Err(TokenizeError::InvalidRegister(format!(r#"Failed to parse register: "{}""#, word))),
                 };
             }, // A register is not present.
-            _ => return Err(TokenizeError::InvalidRegister(format!("Failed to parse register: \"{}\"", word))),
+            _ => return Err(TokenizeError::InvalidRegister(format!(r#"Failed to parse register: "{}""#, word))),
         }
     }
 
@@ -240,19 +248,18 @@ impl<T: ParseWithRadix + FromStr + Copy + Debug + Default> Tokenizer<T>
 
         if let Some(symbol) = offset_symbol_split.last()
         {
-
             return Ok(Token::Offset
             {
                 base: if REGISTER_REGEX.is_match(symbol)
                 {
                     match Self::get_register(symbol)
-                    {
+                    { // Offset is relative to a register.
                         Ok(Token::Register(char_val, num_val)) => RelativeSymbol::Register(char_val, num_val),
                         _ => return Err(TokenizeError::InvalidOffset("Failed to parse an offset value.".to_string())),
                     }
                 }
                 else
-                {
+                { // Offset is relative to a label symbol.
                     RelativeSymbol::Label(symbol.to_string())
                 },
                 offset: parse_value::<T>(offset_symbol_split.first().unwrap_or(&"")).unwrap_or_default(),
@@ -263,14 +270,13 @@ impl<T: ParseWithRadix + FromStr + Copy + Debug + Default> Tokenizer<T>
     }
 
     fn process_instruction(line: &str) -> Result<Token<T>, TokenizeError>
-    {
-        // Mnemonic and operands split.
+    { // Mnemonic and operands split.
         let mnemonic_split: Vec<&str> = line
             .trim().splitn(2, ' ')
             .collect();
 
         if let Some(mnemonic) = mnemonic_split.first()
-        { // todo: differeniating _, f_.s, f_.d instrutions.
+        { // todo: differentiating _, f_.s, f_.d instrutions.
             let mut operands = Vec::new();
 
             for operand in mnemonic_split[1].split(',').map(|s| s.trim())
@@ -284,31 +290,67 @@ impl<T: ParseWithRadix + FromStr + Copy + Debug + Default> Tokenizer<T>
                     operands.push(Self::get_offset(operand)?)
                 }
                 // Immediate operands, hexadecimal and decimal values.
-                else if operand.chars().all(|c| c.is_ascii_hexdigit() || c == 'x') {
+                else if operand.chars().all(|c| c.is_ascii_hexdigit() || c == 'x') 
+                {
                     match parse_value::<T>(operand)
                     { // Parse the index value.
                         Ok(val) => operands.push(Token::Immediate(val)),
-                        Err(_) => return Err(TokenizeError::InvalidImmediate(format!("Failed to parse an immediate operand: \"{}\"", operand)))
+                        Err(_) => return Err(TokenizeError::InvalidImmediate(format!(r#"Failed to parse an immediate operand: "{}""#, operand)))
                     }
                 } // Regex is potentially over-kill but captures syntax perfectly.
-                // alphabetic or _ first character followed by alphanumeric or _.
+                  // alphabetic or _ first character followed by alphanumeric or _.
                 else if DESTINATION_REGEX.is_match(operand)
                 {
-                    operands.push(Token::Destination(operand.trim().to_string()))
+                    operands.push(Token::Offset{ base: RelativeSymbol::Label(operand.trim().to_string()), offset: T::default()})
                 }
                 else
                 {
-                    return Err(TokenizeError::InvalidInstruction(format!("Unable to parse an instruction operand: \"{}\"", operand)))
+                    return Err(TokenizeError::InvalidInstruction(format!(r#"Unable to parse an instruction operand: "{}""#, operand)))
                 }
             }
 
             return Ok(Token::Instruction(mnemonic.to_string(), operands))
         }
-        Err(TokenizeError::InvalidInstruction(format!("Unable to parse instruction from line: \"{}\"", line)))
+        Err(TokenizeError::InvalidInstruction(format!(r#"Unable to parse instruction from line: "{}""#, line)))
     }
 
     fn process_constant_data(line: &str) -> Result<Token<T>, TokenizeError>
-    {
+    { // Split at data directive.
+        let directive_split: Vec<&str> = line
+            .splitn(2, ' ')
+            .collect();
+
+        if let& [directive, content] = &directive_split[..] 
+        { // Parse data depending on directive.
+            return Ok(match directive 
+            {
+                ".ascii" | ".asciz" | ".string" => 
+                {
+                    Token::Data(DataType::String(content.to_string()))
+                }
+                ".byte" => 
+                {
+                    Token::Data(DataType::Byte(parse_data::<u8>(content)))
+                }
+                ".half" | ".halfword" => 
+                {
+                    Token::Data(DataType::Half(parse_data::<u16>(content)))
+                }
+                ".word" => 
+                {
+                    Token::Data(DataType::Word(parse_data::<u32>(content)))
+                }
+                ".dword" => 
+                {
+                    Token::Data(DataType::Dword(parse_data::<u64>(content)))
+                }
+                _ => 
+                {
+                    return Err(TokenizeError::InvalidDataDirective(format!(r#"Unable to parse content of data directive: "{}""#, content)))
+                }
+            })
+        }
+        
         Ok(Token::Debug(line.to_string()))
     }
 
@@ -324,9 +366,9 @@ impl<T: ParseWithRadix + FromStr + Copy + Debug + Default> Tokenizer<T>
         }
 
         // Failed to process the contents of a line.
-        Err(TokenizeError::Other(format!("Unable to parse from line: \"{}\"", line)))
+        Err(TokenizeError::Other(format!(r#"Unable to parse from line: "{}""#, line)))
     }
-
+   
     fn process_block(block: Vec<&str>) -> Result<Vec<Token<T>>, TokenizeError>
     {
         let mut tokens = Vec::new();
