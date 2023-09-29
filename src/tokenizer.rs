@@ -31,7 +31,7 @@ bitflags!
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DataType
-{
+{ // Data directives.
     Byte(Vec<u8>),
     Half(Vec<u16>),
     Word(Vec<u32>),
@@ -53,14 +53,9 @@ pub enum Token<T: Copy + Debug>
     Label(String, Vec<Token<T>>),
     Data(DataType),
     Instruction(String, Vec<Token<T>>),
-    Offset
-    {
-        base: RelativeSymbol,
-        offset: T
-    },
+    Offset{ base: RelativeSymbol, offset: T },
     Register(char, u8),
-    Immediate(T),
-    Debug(String)
+    Immediate(T)
 }
 
 #[derive(Debug)]
@@ -69,7 +64,7 @@ enum TokenizeError
     InvalidSection(String),
     InvalidSectionFlag(String),
     InvalidLabel(String),
-    InvalidDataDirective(String),
+    InvalidConstant(String),
     InvalidInstruction(String),
     InvalidRegister(String),
     InvalidImmediate(String),
@@ -99,12 +94,12 @@ macro_rules! impl_parse_with_radix
 
 impl_parse_with_radix!(u8);
 impl_parse_with_radix!(i8);
-impl_parse_with_radix!(i16);
 impl_parse_with_radix!(u16);
-impl_parse_with_radix!(i32);
-impl_parse_with_radix!(i64);
+impl_parse_with_radix!(i16);
 impl_parse_with_radix!(u32);
+impl_parse_with_radix!(i32);
 impl_parse_with_radix!(u64);
+impl_parse_with_radix!(i64);
 
 enum ParseValueError<T: FromStr>
 {
@@ -112,7 +107,8 @@ enum ParseValueError<T: FromStr>
     StrError(<T as FromStr>::Err)
 }
 
-fn parse_value<T: ParseWithRadix + std::str::FromStr>(s: &str) -> Result<T, ParseValueError<T>> {
+fn parse_value<T: ParseWithRadix + std::str::FromStr>(s: &str) -> Result<T, ParseValueError<T>>
+{
     if s.starts_with("0x")
     {
         T::from_str_radix(&s[2..], 16).map_err(ParseValueError::IntError)
@@ -123,7 +119,8 @@ fn parse_value<T: ParseWithRadix + std::str::FromStr>(s: &str) -> Result<T, Pars
     }
 }
 
-fn parse_data<T: ParseWithRadix + Default + std::str::FromStr>(content: &str) -> Vec<T> {
+fn parse_data<T: ParseWithRadix + Default + std::str::FromStr>(content: &str) -> Vec<T> 
+{
     content
         .split(',')
         .map(|s| parse_value::<T>(s.trim()).unwrap_or_default())
@@ -196,34 +193,31 @@ impl<T: ParseWithRadix + FromStr + Copy + Debug + Default> Tokenizer<T>
                             't' => section_flags |= SectionFlags::TLS,
                             _   =>
                             { // Failed while parsing a section flag that is unsupported.
-                                return Err(TokenizeError::InvalidSectionFlag(format!(r#"Unrecognized section flag identifier: "{}""#, c)))
+                                return Err(TokenizeError::InvalidSectionFlag(
+                                    format!(r#"Unrecognized section flag identifier: "{}""#, c)
+                                ))
                             }
                         }
                     }
                     return Ok((section_name, section_flags))
                 }, // Handle sections with pre-defined attributes.
-                ".text" | ".init" | ".fini" => 
-                {
-                    section_flags |= SectionFlags::EXECUTE
-                }
-                ".data" | ".sdata" =>
-                {
-                    section_flags |= SectionFlags::ALLOCATE | SectionFlags::WRITE
-                }
-                ".bss" | ".sbss" | ".rodata" =>
-                {
-                    section_flags |= SectionFlags::ALLOCATE
-                }
+                ".text" | ".init" | ".fini"  => section_flags |= SectionFlags::EXECUTE,
+                ".bss" | ".sbss" | ".rodata" => section_flags |= SectionFlags::ALLOCATE,
+                ".data" | ".sdata"           => section_flags |= SectionFlags::ALLOCATE | SectionFlags::WRITE,           
                 _ => 
-                {
-                    return Err(TokenizeError::InvalidSection(format!(r#"Unrecognized section directive from line: "{}""#, line)))
+                { // Failed to parse section directive.
+                    return Err(TokenizeError::InvalidSection(
+                        format!(r#"Unrecognized section directive from line: "{}""#, line)
+                    ))
                 }
             }
 
             return Ok((directive.trim_start_matches('.'), section_flags))
         }
 
-        Err(TokenizeError::InvalidSection(format!(r#"Unable to parse section directive from line: "{}""#, line)))
+        Err(TokenizeError::InvalidSection(
+            format!(r#"Unable to parse section directive from line: "{}""#, line)
+        ))
     }
 
     fn get_register(word: &str) -> Result<Token<T>, TokenizeError>
@@ -235,10 +229,14 @@ impl<T: ParseWithRadix + FromStr + Copy + Debug + Default> Tokenizer<T>
                 match &word[1..].parse::<u8>()
                 { // Parse the index value.
                     Ok(val) => return Ok(Token::<T>::Register(prefix, *val)),
-                    Err(_) => return Err(TokenizeError::InvalidRegister(format!(r#"Failed to parse register: "{}""#, word))),
-                };
+                    Err(_) => return Err(TokenizeError::InvalidRegister(
+                        format!(r#"Unable to parse register from: "{}""#, word)
+                    )),
+                }
             }, // A register is not present.
-            _ => return Err(TokenizeError::InvalidRegister(format!(r#"Failed to parse register: "{}""#, word))),
+            _ => return Err(TokenizeError::InvalidRegister(
+                format!(r#"Unable to parse register from: "{}""#, word)
+            )),
         }
     }
 
@@ -255,18 +253,23 @@ impl<T: ParseWithRadix + FromStr + Copy + Debug + Default> Tokenizer<T>
                     match Self::get_register(symbol)
                     { // Offset is relative to a register.
                         Ok(Token::Register(char_val, num_val)) => RelativeSymbol::Register(char_val, num_val),
-                        _ => return Err(TokenizeError::InvalidOffset("Failed to parse an offset value.".to_string())),
+                        _ => return Err(TokenizeError::InvalidOffset(
+                            format!(r#"Unable to parse register from: "{}""#, symbol)
+                        )),
                     }
                 }
                 else
                 { // Offset is relative to a label symbol.
                     RelativeSymbol::Label(symbol.to_string())
                 },
-                offset: parse_value::<T>(offset_symbol_split.first().unwrap_or(&"")).unwrap_or_default(),
+                offset: parse_value::<T>(
+                    offset_symbol_split.first().unwrap_or(&""))
+                    .unwrap_or_default(),
             });
         }
-
-        Ok(Token::Debug(word.to_string()))
+        Err(TokenizeError::InvalidOffset(
+            format!(r#"Unable to parse offset from: "{}""#, word)
+        ))
     }
 
     fn process_instruction(line: &str) -> Result<Token<T>, TokenizeError>
@@ -295,7 +298,11 @@ impl<T: ParseWithRadix + FromStr + Copy + Debug + Default> Tokenizer<T>
                     match parse_value::<T>(operand)
                     { // Parse the index value.
                         Ok(val) => operands.push(Token::Immediate(val)),
-                        Err(_) => return Err(TokenizeError::InvalidImmediate(format!(r#"Failed to parse an immediate operand: "{}""#, operand)))
+                        Err(_) => {
+                            return Err(TokenizeError::InvalidImmediate(
+                                format!(r#"Unable to parse an immediate operand: "{}""#, operand)
+                            ))
+                        }
                     }
                 } // Regex is potentially over-kill but captures syntax perfectly.
                   // alphabetic or _ first character followed by alphanumeric or _.
@@ -305,13 +312,16 @@ impl<T: ParseWithRadix + FromStr + Copy + Debug + Default> Tokenizer<T>
                 }
                 else
                 {
-                    return Err(TokenizeError::InvalidInstruction(format!(r#"Unable to parse an instruction operand: "{}""#, operand)))
+                    return Err(TokenizeError::InvalidInstruction(
+                        format!(r#"Unable to parse an instruction operand: "{}""#, operand)
+                    ))
                 }
             }
-
             return Ok(Token::Instruction(mnemonic.to_string(), operands))
         }
-        Err(TokenizeError::InvalidInstruction(format!(r#"Unable to parse instruction from line: "{}""#, line)))
+        Err(TokenizeError::InvalidInstruction(
+            format!(r#"Unable to parse instruction from line: "{}""#, line)
+        ))
     }
 
     fn process_constant_data(line: &str) -> Result<Token<T>, TokenizeError>
@@ -324,34 +334,22 @@ impl<T: ParseWithRadix + FromStr + Copy + Debug + Default> Tokenizer<T>
         { // Parse data depending on directive.
             return Ok(match directive 
             {
-                ".ascii" | ".asciz" | ".string" => 
-                {
-                    Token::Data(DataType::String(content.to_string()))
-                }
-                ".byte" => 
-                {
-                    Token::Data(DataType::Byte(parse_data::<u8>(content)))
-                }
-                ".half" | ".halfword" => 
-                {
-                    Token::Data(DataType::Half(parse_data::<u16>(content)))
-                }
-                ".word" => 
-                {
-                    Token::Data(DataType::Word(parse_data::<u32>(content)))
-                }
-                ".dword" => 
-                {
-                    Token::Data(DataType::Dword(parse_data::<u64>(content)))
-                }
+                ".byte"                         => Token::Data(DataType::Byte(parse_data::<u8>(content))),
+                ".half" | ".halfword"           => Token::Data(DataType::Half(parse_data::<u16>(content))),
+                ".word"                         => Token::Data(DataType::Word(parse_data::<u32>(content))),
+                ".dword"                        => Token::Data(DataType::Dword(parse_data::<u64>(content))),
+                ".ascii" | ".asciz" | ".string" => Token::Data(DataType::String(content.to_string())),
                 _ => 
-                {
-                    return Err(TokenizeError::InvalidDataDirective(format!(r#"Unable to parse content of data directive: "{}""#, content)))
+                { // Unrecognized data directive.
+                    return Err(TokenizeError::InvalidConstant(
+                        format!(r#"Unable to parse content of data directive: "{}""#, content)
+                    ))
                 }
             })
-        }
-        
-        Ok(Token::Debug(line.to_string()))
+        }        
+        Err(TokenizeError::InvalidConstant(
+            format!(r#"Unable to parse constant from line: "{}""#, line)
+        ))
     }
 
     fn process_line(line: &str) -> Result<Token<T>, TokenizeError>
@@ -364,7 +362,6 @@ impl<T: ParseWithRadix + FromStr + Copy + Debug + Default> Tokenizer<T>
         { // Process as constant data.
             return Ok(Self::process_constant_data(line)?)
         }
-
         // Failed to process the contents of a line.
         Err(TokenizeError::Other(format!(r#"Unable to parse from line: "{}""#, line)))
     }
@@ -376,11 +373,13 @@ impl<T: ParseWithRadix + FromStr + Copy + Debug + Default> Tokenizer<T>
 
         // Closure to process lines until a specific condition is met.
         let process_lines_until =
-            |line_iter: &mut std::iter::Peekable<std::slice::Iter<&str>>, condition: &dyn Fn(&str) -> bool| -> Result<Vec<Token<T>>, TokenizeError>
+            |line_iter: &mut std::iter::Peekable<std::slice::Iter<&str>>, condition: &dyn Fn(&str) 
+                -> bool| -> Result<Vec<Token<T>>, TokenizeError>
             {
                 let mut current_tokens = Vec::new();
 
-                while let Some(&next_line) = line_iter.peek() {
+                while let Some(&next_line) = line_iter.peek() 
+                {
                     if condition(next_line)
                     { // e.g. is_section, is_label, etc.
                         break;
@@ -405,7 +404,8 @@ impl<T: ParseWithRadix + FromStr + Copy + Debug + Default> Tokenizer<T>
                  // Consume the section line.
                 line_iter.next();
 
-                while let Some(&inner_line) = line_iter.peek() {
+                while let Some(&inner_line) = line_iter.peek() 
+                {
                     if SECTION_REGEX.is_match(inner_line)
                     { // End of the current section.
                         break;
@@ -444,7 +444,6 @@ impl<T: ParseWithRadix + FromStr + Copy + Debug + Default> Tokenizer<T>
                 line_iter.next();
             }
         }
-
         Ok(tokens)
     }
 }

@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [[test]]
 name = "tokenizer"
-path = "src/tests/tokenizer.rs"
+path = "tests/tokenization.rs"
 
 [dependencies]
 bitflags = "1.3"

@@ -1,10 +1,4 @@
-mod tokenizer;
-use tokenizer::*;
-
-#[cfg(test)]
-mod tests {
-    mod tokenizer;
-}
+use xsint::tokenizer::*;
 
 fn main() {
     match Tokenizer::<i32>::new_from_string(

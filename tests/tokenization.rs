@@ -1,4 +1,4 @@
-use super::super::tokenizer::*;
+use xsint::tokenizer::*;
 
 #[test]
 fn section_parsing() 
@@ -29,10 +29,7 @@ fn instruction_parsing()
     match tokenizer {
         Ok(parser) => 
         {
-            assert_eq!(parser.tokens.len(), 1);
-            assert_eq!(
-                parser.tokens[0],
-                Token::Section("text".to_string(), SectionFlags::EXECUTE, vec![
+            assert_eq!(parser.tokens[0], Token::Section("text".to_string(), SectionFlags::EXECUTE, vec![
                     Token::Instruction("addi".to_string(), vec![Token::Register('x', 5), Token::Register('x', 6), Token::Immediate(255)])
                 ])
             );
@@ -57,10 +54,8 @@ fn data_parsing() {
     match tokenizer 
     {
         Ok(parser) => 
-        { // .rodata, data_label, string directive, word directive.
-            assert_eq!(
-                parser.tokens[0],
-                Token::Section("rodata".to_string(), SectionFlags::ALLOCATE, vec![
+        {
+            assert_eq!(parser.tokens[0], Token::Section("rodata".to_string(), SectionFlags::ALLOCATE, vec![
                     Token::Label("data_label".to_string(), vec![
                         Token::Data(DataType::String("\"Hello, World!\"".to_string())),
                         Token::Data(DataType::Word(vec![100, 0x100, 235]))
@@ -68,10 +63,7 @@ fn data_parsing() {
                 ])
             );
 
-            // Empty .bss section.
-            assert_eq!(
-                parser.tokens[1],
-                Token::Section("bss".to_string(), SectionFlags::ALLOCATE, vec![]));
+            assert_eq!(parser.tokens[1], Token::Section("bss".to_string(), SectionFlags::ALLOCATE, vec![]));
         },
         Err(_) => panic!("Failed on tokenizer test 'data_parsing'!"),
     }
