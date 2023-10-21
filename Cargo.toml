@@ -1,18 +1,22 @@
 [package]
-name = "xsint"
-description = "Lightweight RISC-V Interpreter"
+name = "xemu"
+description = "RISC-V Toolchain And Emulator"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "xsint"
+name = "xemu"
 path = "src/main.rs"
 
 [[test]]
-name = "tokenizer"
-path = "tests/tokenization.rs"
+name = "lexer"
+path = "tests/lexer.rs"
+
+[[test]]
+name = "assembler"
+path = "tests/assembler.rs"
 
 [dependencies]
-bitflags = "1.3"
 regex = "1"
+bitflags = "1.3"
 lazy_static = "1.4"
