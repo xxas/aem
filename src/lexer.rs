@@ -1,11 +1,12 @@
-use crate::{
-    utility::*,
-    codec::architecture::*,
-    memory::*
+use crate::{ 
+    arch::*, 
+    util::*, 
+    mem::* 
 };
 
 use lazy_static::lazy_static;
-use std::str::FromStr;
+use std::convert::TryFrom;
+use num_traits::Num;
 use regex::Regex;
 
 lazy_static!
@@ -24,10 +25,7 @@ lazy_static!
     // Matches strings representing relocation functions (e.g. "%hi(Symbol)").
     static ref RELOCATION_REGEX: Regex         = Regex::new(r#"%((?:pc|tp)?rel_)?(hi|lo|add)\([^)]+\)"#).unwrap();
 
-    /* Matches strings representing:
-     *      Negative decimal numbers (e.g. "-123").
-     *      Positive decimal numbers (e.g. "123").
-     *      Hexadecimal numbers with either lowercase or uppercase letters (e.g. "0xff" or "0X1A"). */
+    // Matches strings representing negative/positive decimal and hexadecimal.
     static ref SIGNED_REGEX: Regex          = Regex::new(r"^(-\d+|\d+|0x[0-9a-fA-F]+)$").unwrap();
 
     // Matches strings following allowed identifier characters.
@@ -38,30 +36,31 @@ lazy_static!
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum RValue
+pub enum RValue<T: Num>
 {
     Register(char /* Type */, u32 /* Index */),
-    Identifier(String /* Macro parameters, Symbols. */),
-    Immediate(i32 /* Immediate value */)
+    Identifier(String /* Symbol name. */),
+    Immediate(T /* Immediate value */)
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operand
 {
-    RValue(RValue),
-    RelocationFn(String /* Function name */, RValue /* Symbol */),
-    Address(RValue /* Relative Symbol/register */, RValue /* Offset value */)
+    RValue(RValue<i32>),
+    RelocationFn(String /* Function name */, RValue<i32> /* Symbol */),
+    Address(RValue<i32> /* Relative Symbol/register */, RValue<i32> /* Offset value */)
 }
 
-impl From<RValue> for Operand
+impl From<RValue<i32>> for Operand
 {
-    fn from(rvalue: RValue) -> Self
+    fn from(rvalue: RValue<i32>) -> Self
     {
         Operand::RValue(rvalue)
     }
 }
 
-impl std::convert::TryFrom<Operand> for RValue {
+impl TryFrom<Operand> for RValue<i32> 
+{
     type Error = ();
 
     fn try_from(operand: Operand) -> Result<Self, Self::Error>
@@ -78,11 +77,11 @@ impl std::convert::TryFrom<Operand> for RValue {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Emittable
 {
-    Byte(Vec<u8>   /*   8-bit values seperated by commas. */),
-    Half(Vec<u16>  /*  16-bit values seperated by commas. */),
-    Word(Vec<u32>  /*  32-bit values seperated by commas. */),
-    Dword(Vec<u64> /*  64-bit values seperated by commas. */),
-    String(String  /*  Null terminated string. */),
+    Byte(Vec<RValue<i8>>   /*   8-bit values seperated by commas. */),
+    Half(Vec<RValue<i16>>  /*  16-bit values seperated by commas. */),
+    Word(Vec<RValue<i32>>  /*  32-bit values seperated by commas. */),
+    Dword(Vec<RValue<i64>> /*  64-bit values seperated by commas. */),
+    String(String /*  Null terminated string. */),
     Instruction(String /* Mnemonic */, Vec<Operand> /* Operands (if applicable). */)
 }
 
@@ -103,23 +102,22 @@ macro_rules! impl_from_for_emittable
 }
 
 impl_from_for_emittable!(
-    Byte(Vec<u8>),
-    Half(Vec<u16>),
-    Word(Vec<u32>),
-    Dword(Vec<u64>),
+    Byte(Vec<RValue<i8>>), 
+    Half(Vec<RValue<i16>>),
+    Word(Vec<RValue<i32>>),
+    Dword(Vec<RValue<i64>>),
 );
 
-// Directive to set Symbol visibility (local/global scope).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Visibility
-{
+{ // Directive to set Symbol visibility (local/global scope).
     Local(String  /* Symbol name */),
     Global(String /* Symbol name */)
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Align
-{
+{ // Directive to set alignment.
     AsPow(u32 /* alignment (x^2) */, u32 /* Padding value */, u32 /* Max padding value */),
     AsBytes(u32 /* Byte alignment value */, u32 /* Padding value */)
 }
@@ -129,7 +127,7 @@ pub enum Directive
 {
     Alignment(Align),
     Section(String, SectionFlags, u32),
-    Equal(String /* Symbol Name */, RValue /* Constant Value */),
+    Equ(String /* Symbol Name */, RValue<i32> /* Constant Value */),
     Scope(Visibility /* Symbol visibility (e.g. local, global scope) */),
     Macro(String /* Macro name */, Vec<String> /* Macro arguments */),
     Marker(String /* Name */)
@@ -185,6 +183,14 @@ pub enum LexerErr
 pub struct Lexer
 {
     pub tokens: Vec<Token>
+}
+
+impl From<Lexer> for Vec<Token>
+{
+    fn from(lexer: Lexer) -> Self
+    {
+        lexer.tokens
+    }
 }
 
 impl Lexer
@@ -256,10 +262,41 @@ impl Lexer
             {
                 "global" | "globl" => Ok(Visibility::Global(args_str.into()).into()),
                 "local"            => Ok(Visibility::Local(args_str.into()).into()),
+                "equ" =>
+                {
+                    if let Some((name_str, value_str)) = args_str.split_once(',')
+                    {
+                        let const_val = i32::parse(value_str.trim())
+                                    .map(|val|RValue::Immediate(val))
+                                    .map_err(|_|LexerErr::Parsing(
+                                        format!("Unable to parse immediate value: {}", value_str)
+                                    ))?;
+
+                        return Ok(Directive::Equ(name_str.trim().into(), const_val))
+                    }
+                    
+                    Err(LexerErr::Parsing(
+                        format!(r#"Unable to parse directive: "{}""#, line)
+                    ))
+                },
+                "macro" =>
+                { // Split name and arguments.
+                    if let Some((name, args)) = args_str.split_once(' ')
+                    { // Split arguments and filter empty lines.
+                        let args_split: Vec<String> = args.split(',').map(|word| word.trim())
+                        .filter(|word|!word.is_empty()).map(|word|word.into()).collect();
+
+                        return Ok(Directive::Macro(name.into(), args_split))
+                    }
+
+                    // No arguments provided.
+                    Ok(Directive::Macro(args_str.trim().into(), vec![]))                     
+                },
                 "align" | "p2align" =>
                 { // Split arguments at ',', trim and filter words with SIGNED_REGEX.
                     let args_split: Vec<&str> = args_str.split(',')
-                        .map(|word| word.trim()).filter(|word| SIGNED_REGEX.is_match(word))
+                        .map(|word| word.trim())
+                        .filter(|word| SIGNED_REGEX.is_match(word))
                         .collect();
 
                     // Too few or too many arguments provided.
@@ -271,19 +308,19 @@ impl Lexer
                     }
 
                     let mut args_iter = args_split.iter();
-                    let mut extract_or = |default_val: Option<u32>| -> Result<u32, LexerErr>
-                    { // Advance, extract provided argument value or default value.
+                    let mut parse_or = |default_val: Option<u32>| -> Result<u32, LexerErr>
+                    { // Advance, parse provided argument value or resort to default value.
                         args_iter.next().map_or_else(|| default_val.ok_or(LexerErr::Parsing(
                                 "Unable to parse alignment value from arguments.".into()
-                            )), |arg_str| parse_value::<u32>(arg_str)
+                            )), |arg_str| u32::parse(arg_str)
                             .or_else(|_| default_val.ok_or(LexerErr::Parsing(
                                     "Unable to parse alignment value from arguments.".into()
                             ))))
                     };
 
                     // Extract each argument value or it's corresponding default value (0).
-                    Ok(Align::AsPow(extract_or(None)?,
-                        extract_or(Some(0))?, extract_or(Some(0))?
+                    Ok(Align::AsPow(parse_or(None)?,
+                        parse_or(Some(0))?, parse_or(Some(0))?
                     ).into())
                 },
                 "section" =>
@@ -317,16 +354,16 @@ impl Lexer
         }
         else
         {
-            let directive = line.trim();
+            let directive_str = line.trim();
 
-            match directive
-            {
-                "text" | "init" | "fini"   => Ok(Directive::Section(directive.into(), SectionFlags::EXECUTE, 4)),
-                "bss"  | "sbss" | "rodata" => Ok(Directive::Section(directive.into(), SectionFlags::ALLOCATE, 4)),
-                "data" | "sdata" => Ok(Directive::Section(directive.into(), SectionFlags::ALLOCATE | SectionFlags::WRITE, 4)),
-                "endm"           => Ok(Directive::Marker(directive.into())),
+            match directive_str
+            { // Map default section flags.
+                "text" | "init" | "fini"   => Ok(Directive::Section(directive_str.into(), SectionFlags::EXECUTE, 2)),
+                "bss"  | "sbss" | "rodata" => Ok(Directive::Section(directive_str.into(), SectionFlags::ALLOCATE, 2)),
+                "data" | "sdata" => Ok(Directive::Section(directive_str.into(), SectionFlags::ALLOCATE | SectionFlags::WRITE, 2)),
+                "endm"           => Ok(Directive::Marker(directive_str.into())),
                 _ => Err(LexerErr::Parsing(
-                    format!(r#"Unable to match directive: "{}""#, directive)
+                    format!(r#"Unable to match directive: "{}""#, directive_str)
                 ))
             }
         }
@@ -337,21 +374,23 @@ impl Lexer
         match line.split_once(' ')
         {
             Some((directive_str, args_str)) =>
-            { // Extract each value of 'V' separated by ','.
-                fn extract_values<V: ParseWithRadix + FromStr>(arguments: &str) -> Result<Vec<V>, LexerErr>
-                {
-                    arguments.split(',').map(|s|parse_value::<V>(s.trim())
-                        .map_err(|_| LexerErr::Parsing(
-                            format!(r#"Unable to parse data directive value: {}"#, s)
-                        ))).collect()
+            { // Parse argument values from string as 'V'.
+                fn parse_or<V: ParseFrom>(args_str: &str) -> Result<Vec<RValue<V>>, LexerErr>
+                { // split, trim and parse arguments as 'V'.
+                    Ok(args_str.split(',')
+                    .map(str::trim)
+                    .map(|s| V::parse(s).map_or_else(
+                            |_|RValue::Identifier(s.into()),
+                            RValue::Immediate))
+                        .collect())
                 }
 
                 match directive_str
-                {
-                    "byte"  => Ok(extract_values::<u8>(args_str)?.into()),
-                    "half"  => Ok(extract_values::<u16>(args_str)?.into()),
-                    "word"  => Ok(extract_values::<u32>(args_str)?.into()),
-                    "dword" => Ok(extract_values::<u64>(args_str)?.into()),
+                { // Common emittable data directives.
+                    "byte"  => Ok(parse_or::<i8>(args_str)?.into()),
+                    "half"  => Ok(parse_or::<i16>(args_str)?.into()),
+                    "word"  => Ok(parse_or::<i32>(args_str)?.into()),
+                    "dword" => Ok(parse_or::<i64>(args_str)?.into()),
                     "string" | "asciz" =>
                     {
                         STRING_REGEX.captures(args_str)
@@ -364,8 +403,8 @@ impl Lexer
                     },
                     "zero" =>
                     {
-                        parse_value::<usize>(args_str)
-                            .map(|size_val| Emittable::Byte(vec![0; size_val]))
+                        usize::parse(args_str)
+                            .map(|size_val| Emittable::Byte(vec![RValue::Immediate(0); size_val]))
                             .map_err(|_| LexerErr::Parsing(
                                 format!(r#"Invalid arguments provided for .zero directive: {}"#, args_str)
                             ))
@@ -384,10 +423,9 @@ impl Lexer
     fn get_instruction(line: &str) -> Result<Emittable, LexerErr>
     { // split instruction mnemonic and operands.
         if let Some((mnemonic_str, operands_str)) = line.split_once(' ')
-        {
+        { // Match each operand on the right side of the mnemonic.
             let mut tokens = Vec::new();
 
-            // Split at each ',' and tokenize each split operand.
             for operand_str in operands_str.split(',').map(|s|s.trim())
             {
                 if REGISTER_REGEX.is_match(operand_str)
@@ -404,7 +442,7 @@ impl Lexer
                 }
                 else if SIGNED_REGEX.is_match(operand_str)
                 {
-                    parse_value::<i32>(operand_str)
+                    i32::parse(operand_str)
                         .map(|val| tokens.push(RValue::Immediate(val).into()))
                         .map_err(|_| LexerErr::Parsing(
                             format!(r#"Unable to parse immediate value: "{}""#, operand_str)
@@ -457,11 +495,11 @@ impl Lexer
         let mut operand_splits = operand.trim_end_matches(')').split('(');
 
         match operand_splits.next()
-        {
-            Some(first_str) => match parse_value::<i32>(first_str)
+        { //  Parse first string as the offset value.
+            Some(first_str) => match i32::parse(first_str)
             {
                 Ok(offset_val) => match operand_splits.next()
-                {
+                { // Get the relative identifier.
                     Some(second_str) => Ok(
                         extract_or_err(offset_val, second_str)?
                     ),
@@ -511,7 +549,7 @@ impl Lexer
         }
     }
 
-    fn get_register(register: &str) -> Result<RValue, LexerErr>
+    fn get_register(register: &str) -> Result<RValue<i32>, LexerErr>
     {
         if CONVENTIONAL_TO_ABI.contains_key(register)
         { // Conventional register names to ABI names.
@@ -535,6 +573,19 @@ impl Lexer
                     format!(r#"Unexpected ABI register prefix: "{}""#, register)
                 ))
             }
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! lex
+{
+    ($code: expr) =>
+    {
+        match Lexer::new($code)
+        {
+            Ok(lexer) => Ok(lexer.tokens),
+            Err(lexer_err) => Err(lexer_err)
         }
     }
 }
