@@ -23,7 +23,7 @@ lazy_static!
     static ref RELATIVE_ADDRESS_REGEX: Regex   = Regex::new(r#"(-?\d+)\(([a-zA-Z_][a-zA-Z0-9_]*)\)"#).unwrap();
 
     // Matches strings representing relocation functions (e.g. "%hi(Symbol)").
-    static ref RELOCATION_REGEX: Regex         = Regex::new(r#"%((?:pc|tp)?rel_)?(hi|lo|add)\([^)]+\)"#).unwrap();
+    static ref RELOCATION_REGEX: Regex         = Regex::new(r#"%((?:pc|tp)?rel_)?(highest|higher|hi|lo|add)\([^)]+\)"#).unwrap();
 
     // Matches strings representing negative/positive decimal and hexadecimal.
     static ref SIGNED_REGEX: Regex          = Regex::new(r"^(-\d+|\d+|0x[0-9a-fA-F]+)$").unwrap();
@@ -455,7 +455,7 @@ impl Lexer
                 else
                 {
                     return Err(LexerErr::Syntax(
-                        format!("Unexpected instruction operand: {}", operand_str)
+                        format!(r#"Unexpected instruction operand: "{}""#, operand_str)
                     ))
                 }
             }

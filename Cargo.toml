@@ -19,5 +19,5 @@
 [dependencies]
     regex = "1.10.2"
     bitflags = "2.4.1"
-    num-traits = "0.2.17"
+    num-traits = "0.2.7"
     lazy_static = "1.4.0"

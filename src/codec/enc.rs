@@ -3,9 +3,9 @@ use crate::{
     arch::*
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum EncoderErr
-{
+{ 
     Token(String),
     Mnemonic(String),
     Format(String),
@@ -18,7 +18,8 @@ pub struct Encoder
     pub binary: u32
 }
 
-impl Encoder {
+impl Encoder 
+{
     pub fn new(mnemonic: &String, operands: &Vec<Operand>) -> Result<Self, EncoderErr> 
     {
         if !RV_ISA.contains_key(mnemonic.as_str())
@@ -112,8 +113,7 @@ impl Encoder {
 
     fn encode_op(instruction: &Instruction, operands: &Vec<Operand>) -> Result<u32, EncoderErr> 
     {
-        if let (Ok(RValue::Register(_, rd)), Ok(RValue::Register(_, rs1)), Ok(RValue::Register(_, rs2))) = 
-            (&operands[0].try_into(), &operands[1].try_into(), &operands[2].try_into()) 
+        if let (Operand::RValue(RValue::Register(_, rd)), Operand::RValue(RValue::Register(_, rs1)), Operand::RValue(RValue::Register(_, rs2))) = (&operands[0], &operands[1], &operands[2]) 
         {
             let funct7 = instruction.funct7.unwrap() as u32;
             let funct3 = instruction.funct3.unwrap() as u32;
@@ -133,8 +133,8 @@ impl Encoder {
     { // Todo: Add support for float rounding modes.
         const FRM: u32 = 0b000;
 
-        if let(Ok(RValue::Register(_, rd)), Ok(RValue::Register(_, rs1)), Ok(RValue::Register(_, rs2))) = 
-            (&operands[0].try_into(), &operands[1].try_into(), &operands[2].try_into()) 
+        if let(Operand::RValue(RValue::Register(_, rd)), Operand::RValue(RValue::Register(_, rs1)), Operand::RValue(RValue::Register(_, rs2))) = 
+            (&operands[0], &operands[1], &operands[2]) 
             {    
             let funct5 = instruction.funct5.unwrap() as u32;
             let opcode = instruction.opcode as u32;
@@ -166,8 +166,8 @@ impl Encoder {
     
     fn encode_amo(instruction: &Instruction, operands: &Vec<Operand>) -> Result<u32, EncoderErr> 
     {
-        if let(Ok(RValue::Register(_, rd)), Ok(RValue::Register(_, rs1)), Ok(RValue::Register(_, rs2))) = 
-            (&operands[0].try_into(), &operands[1].try_into(), &operands[2].try_into()) 
+        if let(Operand::RValue(RValue::Register(_, rd)), Operand::RValue(RValue::Register(_, rs1)), Operand::RValue(RValue::Register(_, rs2))) = 
+            (&operands[0], &operands[1], &operands[2]) 
         {
             let funct5 = instruction.funct5.unwrap() as u32;
             let funct3 = instruction.funct3.unwrap() as u32;
@@ -188,8 +188,7 @@ impl Encoder {
   
     fn encode_jalr(instruction: &Instruction, operands: &Vec<Operand>) -> Result<u32, EncoderErr> 
     {
-        if let(Ok(RValue::Register(_, rd)), Ok(Operand::Address(RValue::Register(_, rs1), RValue::Immediate(offset)))) = 
-            (&operands[0].try_into(), &operands[1].try_into()) 
+        if let(Operand::RValue(RValue::Register(_, rd)), Operand::Address(RValue::Register(_, rs1), RValue::Immediate(offset))) = (&operands[0], &operands[1]) 
         {
             let funct3 = instruction.funct3.unwrap() as u32;
             let opcode = instruction.opcode as u32;
@@ -207,8 +206,7 @@ impl Encoder {
 
     fn encode_load(instruction: &Instruction, operands: &Vec<Operand>) -> Result<u32, EncoderErr> 
     {
-        if let(Ok(RValue::Register(_, rd)), Ok(Operand::Address(RValue::Register(_, rs1), RValue::Immediate(offset)))) = 
-            (&operands[0].try_into(), &operands[1].try_into())
+        if let(Operand::RValue(RValue::Register(_, rd)), Operand::Address(RValue::Register(_, rs1), RValue::Immediate(offset))) = (&operands[0], &operands[1])
         {
             let funct3 = instruction.funct3.unwrap() as u32;
             let opcode = instruction.opcode as u32;
@@ -226,8 +224,7 @@ impl Encoder {
 
     fn encode_op_imm(instruction: &Instruction, operands: &Vec<Operand>) -> Result<u32, EncoderErr> 
     {
-        if let(Ok(RValue::Register(_, rd)), Ok(RValue::Register(_, rs1)), Ok(RValue::Immediate(immediate))) = 
-            (&operands[0].try_into(), &operands[1].try_into(), &operands[2].try_into())
+        if let(Operand::RValue(RValue::Register(_, rd)), Operand::RValue(RValue::Register(_, rs1)), Operand::RValue(RValue::Immediate(immediate))) = (&operands[0], &operands[1], &operands[2])
         {
             let funct3 = instruction.funct3.unwrap() as u32;
             let opcode = instruction.opcode as u32;
@@ -276,8 +273,8 @@ impl Encoder {
     
         if mnemonic == "lq"
         {
-            if let (Ok(RValue::Register(_, rd_val)), Ok(Operand::Address(RValue::Register(_, rs1_val), RValue::Immediate(offset)))) = 
-                (&operands[0].try_into(), &operands[1].try_into())
+            if let (Operand::RValue(RValue::Register(_, rd_val)), Operand::Address(RValue::Register(_, rs1_val), RValue::Immediate(offset))) = 
+                (&operands[0], &operands[1])
             {
                 rd = *rd_val;
                 rs1 = *rs1_val;
@@ -292,8 +289,7 @@ impl Encoder {
         } 
         else if mnemonic == "fence"
         {
-            if let (Ok(RValue::Immediate(pred)), Ok(RValue::Immediate(succ))) = 
-                (&operands[0].try_into(), &operands[1].try_into())
+            if let (Operand::RValue(RValue::Immediate(pred)), Operand::RValue(RValue::Immediate(succ))) = (&operands[0], &operands[1])
             {
                 imm = ((*pred as u32) << 4) | (*succ as u32);
             }
@@ -310,22 +306,35 @@ impl Encoder {
         let mut rd: u32 = 0;
         let mut imm: u32 = instruction.funct12.unwrap() as u32;
 
-        if instruction.isa == ISA::Zicsr {
-            if let (Ok(RValue::Register(_, dest)), Ok(csr), Ok(src)) = (
-                &operands[0].try_into(), &operands[1].try_into(),
+        if instruction.isa == ISA::Zicsr 
+        {
+            if let (Operand::RValue(RValue::Register(_, dest)), Operand::RValue(RValue::Immediate(csr)), Ok(src)) = (
+                &operands[0], &operands[1],
                 if instruction.funct3.unwrap() & 0b1000 == 0 
                 { 
-                    Ok(Self::get_register(&operands[2]).unwrap().1)
+                    match operands[2]
+                    {
+                        Operand::RValue(RValue::Register(_, src)) => Ok::<u32, EncoderErr>(src), // specify the types here
+                        _ => return Err(EncoderErr::Operands(
+                            "Invalid operands.".to_string()
+                        ))
+                    }
                 } 
                 else 
                 {
-                    Some((*Self::get_immediate(&operands[2]).unwrap()) as u32)
+                    match operands[2]
+                    {
+                        Operand::RValue(RValue::Immediate(src)) => Ok::<u32, EncoderErr>(src as u32), // specify the types here
+                        _ => return Err(EncoderErr::Operands(
+                            "Invalid operands.".to_string()
+                        ))
+                    }
                 }
             ) {
-                rd = dest;
+                rd = *dest;
                 imm = *csr as u32;
                 rs1 = src.into();
-            }
+            }            
         }
 
         let funct3 = instruction.funct3.unwrap() as u32;
@@ -335,8 +344,8 @@ impl Encoder {
 
     fn encode_store(instruction: &Instruction, operands: &Vec<Operand>) -> Result<u32, EncoderErr> 
     {
-        if let(Ok(RValue::Register(_, rs2)), Ok(Operand::Address(RValue::Register(_, rs1), RValue::Immediate(offset)))) = 
-            (&operands[0].try_into(), &operands[1].try_into())
+        if let(Operand::RValue(RValue::Register(_, rs2)), Operand::Address(RValue::Register(_, rs1), RValue::Immediate(offset))) = 
+            (&operands[0], &operands[1])
         {
             let funct3 = instruction.funct3.unwrap() as u32;
             let opcode = instruction.opcode as u32;
@@ -356,11 +365,9 @@ impl Encoder {
 
     fn encode_branch(instruction: &Instruction, operands: &Vec<Operand>) -> Result<u32, EncoderErr> 
     {
-        if let (Some((_, rs1)), Some((_, rs2)), Some(imm)) = (
-            Self::get_register(&operands[0]),
-            Self::get_register(&operands[1]),
-            Self::get_immediate(&operands[2])
-        ) {
+        if let(Operand::RValue(RValue::Register(_, rs1)), Operand::RValue(RValue::Register(_, rs2)), Operand::RValue(RValue::Immediate(imm))) = 
+            (&operands[0], &operands[1], &operands[2])
+        {
             let funct3 = instruction.funct3.unwrap() as u32;
             let opcode = instruction.opcode as u32;
             let imm_val = *imm as u32;
@@ -382,7 +389,8 @@ impl Encoder {
 
     fn encode_u_type(instruction: &Instruction, operands: &Vec<Operand>) -> Result<u32, EncoderErr> 
     {
-        if let(Ok(RValue::Register(_, rd)), Ok(RValue::Immediate(imm))) = (&operands[0].try_into(), &operands[1].try_into())
+        if let(Operand::RValue(RValue::Register(_, rd)), Operand::RValue(RValue::Immediate(imm))) = 
+            (&operands[0], &operands[1])
         {
             let opcode = instruction.opcode as u32;
             let imm_val = ((*imm as u32) & 0xFFFFF) << 12;
@@ -399,10 +407,9 @@ impl Encoder {
 
     fn encode_jal(instruction: &Instruction, operands: &Vec<Operand>) -> Result<u32, EncoderErr> 
     {
-        if let (Some((_, rd)), Some(imm)) = (
-            Self::get_register(&operands[0]),
-            Self::get_immediate(&operands[1])
-        ) {
+        if let(Operand::RValue(RValue::Register(_, rd)), Operand::RValue(RValue::Immediate(imm))) =
+            (&operands[0], &operands[1])
+        {
             let opcode = instruction.opcode as u32;
             let imm_val = *imm as u32;
 
@@ -418,6 +425,19 @@ impl Encoder {
             Err(EncoderErr::Operands(
                 "Invalid operands.".to_string()
             ))
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! encode
+{
+    ($mnemonic:expr, $operands:expr) => 
+    {
+        match Encoder::new($mnemonic, $operands)
+        {
+            Ok(encoder) => Ok(encoder.binary.to_le_bytes()),
+            Err(encoder_err) => Err(encoder_err)
         }
     }
 }
