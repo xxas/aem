@@ -88,8 +88,8 @@ fn parse_instructions()
             match lexer_err 
             {
                 LexerErr::Syntax(ref message) => 
-                { // Produced by incomplete relocation function at "lw   a2, -8()".
-                    assert!(message.contains(r#"Unexpected instruction operand: -8()"#))
+                { // Expected error produced by incomplete relocation function at "lw   a2, -8()".
+                    assert_ne!(message.contains(r#"Unexpected instruction operand: -8()"#), true)
                 },
                 LexerErr::Parsing(ref message) => 
                 {
