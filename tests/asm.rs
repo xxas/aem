@@ -2,7 +2,7 @@ use aem::{
     asm::*, assemble
 };
 
-// Expands various pseudocode and generates binary.
+// Expands various types of pseudo-code and generates binary.
 #[test]
 fn pseudocode_expansion() 
 {
@@ -38,7 +38,8 @@ fn pseudocode_expansion()
                 0x00000013      // addi x0, x0, 0
             ];
     
-            for (i, chunk) in object.binary.chunks(4).enumerate() {
+            for (i, chunk) in object.binary.chunks(4).enumerate() 
+            {
                 let mut bytes = [0u8; 4];
                 bytes[..chunk.len()].copy_from_slice(chunk);
                 let value = u32::from_le_bytes(bytes);
