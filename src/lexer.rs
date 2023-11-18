@@ -61,14 +61,14 @@ impl From<RValue<i32>> for Operand
 
 impl TryFrom<Operand> for RValue<i32> 
 {
-    type Error = ();
+    type Error = &'static str;
 
     fn try_from(operand: Operand) -> Result<Self, Self::Error>
     {
         match operand 
         {
             Operand::RValue(rvalue) => Ok(rvalue),
-            _ => Err(()),
+            _ => Err("Unable to convert Operand to RValue."),
         }
     }
 }

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use lazy_static::lazy_static;
 
 use crate::{
-    lexer::*, lex, arch::*, 
+    lexer::*, lex, arch::*,
     codec::enc::*, encode
 };
 
@@ -33,7 +33,7 @@ lazy_static!
         let mut m = HashMap::new();
         // Mnemonic         Arguments                   Instruction(s)
         m.insert("nop",    (vec![],                     lex!("addi zero, zero, 0").unwrap()));
-        m.insert("mv",     (vec!["rd", "rs"],           lex!("addi rd, rs, 0").unwrap()));    
+        m.insert("mv",     (vec!["rd", "rs"],           lex!("addi rd, rs, 0").unwrap()));
         m.insert("not",    (vec!["rd", "rs1"],          lex!("xori rd, rs1, -1").unwrap()));
         m.insert("neg",    (vec!["rd", "rs1"],          lex!("sub rd, x0, rs1").unwrap()));
         m.insert("negw",   (vec!["rd", "rs1"],          lex!("subw rd, x0, rs1").unwrap()));
@@ -68,19 +68,19 @@ lazy_static!
         m.insert("li.64",  (vec!["rd", "imm"],          lex!("lui rd, %highest(imm)
                                                               addi rd, rd, %higher(imm)
                                                               slli rd, rd, 32
-                                                              addi rd, rd, %hi(imm) 
-                                                              addi rd, rd, %lo(imm)").unwrap()));     
-        // la variations.                                               
+                                                              addi rd, rd, %hi(imm)
+                                                              addi rd, rd, %lo(imm)").unwrap()));
+        // la variations.
         m.insert("la.16",   (vec!["rd", "symbol"],      lex!("auipc rd, %pcrel_hi(symbol)
                                                               addi rd, rd, %pcrel_lo(symbol)").unwrap()));
         m.insert("la.32",   (vec!["rd", "symbol"],      lex!("lui rd, %hi(symbol)
-                                                              addi rd, rd, %lo(symbol)").unwrap()));      
+                                                              addi rd, rd, %lo(symbol)").unwrap()));
         m.insert("la.64",   (vec!["rd", "symbol"],      lex!("lui rd, %highest(symbol)
                                                               addi rd, rd, %higher(symbol)
                                                               slli rd, rd, 32
                                                               addi rd, rd, %hi(symbol)
                                                               addi rd, rd, %lo(symbol)").unwrap()));
-                                                              
+
         m
     };
 }
@@ -99,7 +99,7 @@ pub struct Assembler
 {
     pub object: Object
 }
- 
+
 impl Assembler
 {
     pub fn new(code: &str) -> Result<Self, AssemblerErr>
@@ -110,11 +110,11 @@ impl Assembler
             { // Drain macro tokens from the token stream.
                 let macros = Self::drain_macros(&mut tokens)?;
 
-                // expand pseudo-code into their counterparts.
+                // expand pseudo-code into actual code.
                 let t = Self::process_expansions(&mut tokens, &macros)?;
 
-                Ok(Assembler       
-                { // Process data, instructions, relocations, etc.
+                Ok(Assembler
+                { // Convert tokens into binary.
                     object: Self::process_binary(&t)?
                 })
             },
@@ -126,13 +126,13 @@ impl Assembler
     fn drain_macros(tokens: &mut Vec<Token>) -> Result<HashMap<String, (Vec<String>, Vec<Token>)>, AssemblerErr>
     {
         let mut to_drain = Vec::new();
-        
+
         // Identify macro directives and their ranges.
-        for (index, token) in tokens.iter().enumerate() 
+        for (index, token) in tokens.iter().enumerate()
         {
             match token
             {
-                Token::Directive(Directive::Macro(name_str, args)) => 
+                Token::Directive(Directive::Macro(name_str, args)) =>
                 { // Check if macro name is a reserved keyword.
                     if RV_ISA.contains_key(name_str.as_str()) || PSEUDO_INSTRUCTIONS.contains_key(name_str.as_str())
                     {
@@ -156,14 +156,14 @@ impl Assembler
         to_drain.sort_by(|a, b| b.2.cmp(&a.2));
 
         let mut macros = HashMap::new();
-    
+
         // Drain macro tokens into the hash map.
-        for (name_str, args, start_index, end_index) in to_drain 
+        for (name_str, args, start_index, end_index) in to_drain
         {
             let mut macro_tokens = tokens.drain(start_index..=end_index).collect::<Vec<Token>>();
             macro_tokens.remove(0); // Remove macro directive.
             macro_tokens.pop();           // Remove endm marker.
-    
+
             macros.insert(name_str, (args.to_vec(), macro_tokens));
         }
 
@@ -180,55 +180,76 @@ impl Assembler
             ))
         }
 
-        for token in &mut exp_details.1
+        exp_details.1.iter_mut()
+            .for_each(|token| match token
         {
-            match token
-            {
-                Token::Emittable(Emittable::Instruction(_, mm_arguments)) =>
-                { // Map placeholder identifiers to actual arguments.
-                    for mm_argument in mm_arguments
+            Token::Emittable(Emittable::Instruction(_, operands)) =>
+            { // Map placeholder identifiers to actual arguments.
+                let find_fn = |identifier: &str| -> Option<Operand>
+                {
+                    if let Some(index) = exp_details.0.iter().position(|s: &String| s == identifier)
                     {
-                        let get_argument_fn = |identifier: &str| -> Result<Operand, AssemblerErr>
-                        {
-                            let index = exp_details.0.iter()
-                                .position(|arg| arg == identifier)
-                                .ok_or_else(|| AssemblerErr::Syntax(
-                                    format!(r#"Argument "{}" not found."#, identifier)
-                                ))?;
-                            Ok(arguments[index].clone())
-                        };
-
-                        if let Operand::RValue(RValue::Identifier(identifier)) = mm_argument
-                        {
-                            *mm_argument = get_argument_fn(&identifier)?;
-                        }
+                        return Some(arguments[index].clone())
                     }
-                },
-                _ => {}
-            }
-        }
-        
+                    None
+                };
+
+                // Match possible operands and replace them with actual argument.
+                operands.iter_mut().for_each(|operand| match operand
+                {
+                    Operand::RValue(RValue::Identifier(ident_str)) =>
+                    {
+                        if let Some(Operand::RValue(new_val)) = find_fn(ident_str)
+                        {
+                            *operand = Operand::RValue(new_val);
+                        }
+                    },
+                    Operand::Address(a, b) =>
+                    {
+                        for val in [a, b]
+                        {
+                            if let RValue::Identifier(ident_str) = &val
+                            {
+                                if let Some(Operand::RValue(new_val)) = find_fn(ident_str)
+                                {
+                                    *val = new_val;
+                                }
+                            }
+                        }
+                    },
+                    Operand::RelocationFn(func_str, RValue::Identifier(ident_str)) =>
+                    {
+                        if let Some(Operand::RValue(new_val)) = find_fn(ident_str)
+                        {
+                            *operand = Operand::RelocationFn(func_str.clone(), new_val);
+                        }
+                    },
+                    _ => {}
+                })
+            },
+            _ => {}
+        });
+
         Ok(&exp_details.1)
     }
-    
+
     fn process_expansions<'a>(tokens: &'a mut Vec<Token>, macros: &'a HashMap<String, (Vec<String>, Vec<Token>)>) -> Result<&'a Vec<Token>, AssemblerErr>
     {
         let mut indices_to_expand = Vec::new();
-    
+
         // Find indices to expand in the token stream.
-        for (index, token) in tokens.iter_mut().enumerate() 
+        for (index, token) in tokens.iter_mut().enumerate()
         {
-            if let Token::Emittable(Emittable::Instruction(mnemonic, arguments)) = token 
-            { // Adjust mnemonic to match the width of the operand.
-                if mnemonic == "li" || mnemonic == "la"
+            if let Token::Emittable(Emittable::Instruction(mnemonic, arguments)) = token
+            {
+                if mnemonic == "li"
                 {
                     if let Operand::RValue(RValue::Immediate(imm)) = &arguments[1]
                     {
-                        let width = match imm 
+                        let width = match imm
                         {
                             -32768..=32767 => "16",
-                            -2147483648..=2147483647 => "32",
-                            _ => "64"
+                            -2147483648..=2147483647 => "32"
                         };
 
                         *mnemonic = format!("{}.{}", mnemonic, width);
@@ -241,7 +262,7 @@ impl Assembler
                     }
                 }
 
-                if PSEUDO_INSTRUCTIONS.contains_key(mnemonic.as_str()) || macros.contains_key(mnemonic.as_str()) 
+                if PSEUDO_INSTRUCTIONS.contains_key(mnemonic.as_str()) || macros.contains_key(mnemonic.as_str())
                 {
                     indices_to_expand.push(index);
                 }
@@ -249,24 +270,26 @@ impl Assembler
         }
         // Sort indices in reverse order to avoid index shifting during expansion.
         indices_to_expand.sort_by(|a, b| b.cmp(&a));
-        
+
         // Expand tokens at the indices.
-        for index in indices_to_expand 
+        for index in indices_to_expand
         {
-            if let Token::Emittable(Emittable::Instruction(mnemonic, arguments)) = &tokens[index] 
-            {
-                let mut exp_details = 
-                    if let Some(details) = PSEUDO_INSTRUCTIONS.get(mnemonic.as_str()) 
+            if let Token::Emittable(Emittable::Instruction(mnemonic, arguments)) = &tokens[index]
+            { // Expand any pseudo-code into actual code.
+                let mut exp_details =
+                    if let Some(details) = PSEUDO_INSTRUCTIONS.get(mnemonic.as_str())
                     {
                         (details.0.iter().map(|s| s.to_string()).collect(), details.1.clone())
                     }
-                    else if let Some(details) = macros.get(mnemonic.as_str()) 
+                    else if let Some(details) = macros.get(mnemonic.as_str())
                     {
-                        details.clone()
+                        (details.0.clone(), Self::process_expansions(&mut details.1.clone(), &macros)?.clone())
                     }
                     else
                     {
-                        continue;
+                        return Err(AssemblerErr::Syntax(
+                            format!(r#""{}" is not a valid instruction."#, mnemonic)
+                        ))
                     };
 
                 let expanded_tokens = Self::expand_code(arguments.clone(), &mut exp_details)?;
@@ -288,12 +311,25 @@ impl Assembler
                 Token::Emittable(Emittable::Instruction(mnemonic, operands)) =>
                 {
                     let bytes = &encode!(&mnemonic, &operands).map_err(AssemblerErr::Encoder)?;
-                                        
+
                     object.binary.extend_from_slice(bytes);
                 },
                 _ => {}
             }
         }
         Ok(object)
+    }
+}
+
+#[macro_export]
+macro_rules! assemble
+{
+    ($code: expr) =>
+    {
+        match Assembler::new($code)
+        {
+            Ok(assembler) => Ok(assembler.object),
+            Err(assembler_err) => Err(assembler_err)
+        }
     }
 }

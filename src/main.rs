@@ -1,33 +1,41 @@
 use aem::{ 
-    asm::*
+    asm::*, assemble
 };
 
 fn main() {
-    match Assembler::new(
+    match assemble!(
         r#"
-        .macro mult_add x, y, z
+    .macro mult_nop_add x, y, z
         mul x, y, z
-        add x, x, z
-    .endm
-        mult_add x0, x1, x2
         nop
-        "#)
+        add x, x, z
+        addi x, x, 0xff
+        neg x, x
+        nop
+    .endm
+        mult_nop_add x0, x1, x2  
+        # result:
+        #   mul x0, x1, x2
+        #   nop
+        #   add x0, x0, x2
+        #   addi x0, x0, 0xff
+        #   neg x0, x0
+        #   nop
+        nop"#)
     {
-        Ok(assembler) => 
-        {
-            // print hex view of generated assembly.
-            for (i, chunk) in assembler.object.binary.chunks(4).enumerate() 
+        Ok(object) => 
+        {   // print hex view of generated assembly.
+            for (i, chunk) in object.binary.chunks(4).enumerate() 
             {
-                // Ensure that we have 4 bytes to form a complete u32, otherwise pad with zeros.
+                // Initialize bytes array with zeros.
                 let mut bytes = [0u8; 4];
-                for (j, &byte) in chunk.iter().enumerate() 
-                {
-                    bytes[j] = byte;
-                }
-            
+
+                // Copy up to 4 bytes from the chunk into the bytes array.
+                bytes[..chunk.len()].copy_from_slice(chunk);
+
                 // Convert bytes to u32; using little-endian format here.
                 let value = u32::from_le_bytes(bytes);
-            
+
                 // Print the u32 value in hexadecimal format.
                 println!("{:04x}: 0x{:08x}", i * 4, value);
             }
