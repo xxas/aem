@@ -47,9 +47,9 @@ fn pseudocode_expansion()
                 assert_eq!(value, expected_values[i], "Mismatch at address 0x{:04x}", i * 4);
             }
         },
-        Err(e) => 
+        Err(asm_err) => 
         {
-            println!("{:?}", e);
+            panic!("failed {:?}", asm_err)
         }
     }
 }
